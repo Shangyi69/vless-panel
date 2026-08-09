@@ -1,112 +1,90 @@
 #!/usr/bin/env python3
-# ══════════════════════════════════════════════════════
-#  VLESS+WS Web Panel  —  Python CGI
-#  DB       : JSON file
-#  Server   : python3 -m http.server --cgi
-#  Protocol : VLESS + WebSocket, NO TLS (security: none)
-#  Mux      : concurrency 8 (fewer HTTP round-trips)
-# ══════════════════════════════════════════════════════
-import os
-import sys
-import json
-import uuid
-import subprocess
-from datetime import datetime, date
-from urllib.parse import parse_qs, quote
+import http.server, socketserver, json, uuid, os, subprocess, datetime, time
+from urllib.parse import parse_qs, urlparse
 
-DB        = "/opt/vless-panel/data/users.json"
-CFG       = "/opt/vless-panel/data/config.json"
-XRAY_CFG  = "/usr/local/etc/xray/config.json"
+# Settings
+PORT = 1190
+BASE_DIR = "/opt/vless-panel"
+DB_FILE = os.path.join(BASE_DIR, "data/users.json")
+CFG_FILE = os.path.join(BASE_DIR, "data/config.json")
+XRAY_CFG = "/usr/local/etc/xray/config.json"
 
+class VlessHandler(http.server.SimpleHTTPRequestHandler):
+    def load_db(self):
+        if not os.path.exists(DB_FILE): return {"users": []}
+        with open(DB_FILE, 'r') as f: return json.load(f)
 
-# ── Config helpers ─────────────────────────────────────
-def cfg_get(key, default=""):
-    try:
-        with open(CFG) as f:
-            c = json.load(f)
-        return c.get(key, default)
-    except Exception:
-        return default
+    def save_db(self, db):
+        with open(DB_FILE, 'w') as f: json.dump(db, f, indent=4)
+        self.rebuild_xray()
 
+    def rebuild_xray(self):
+        pass
 
-SERVER_IP   = cfg_get("server_ip", "")
-VLESS_PORT  = cfg_get("vless_port", 443)
-WS_PATH     = cfg_get("ws_path", "/vless")
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/":
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            db = self.load_db()
+            
+            html = "<html><body><h1>VLESS Panel</h1>"
+            html += "<form action='/add' method='POST'>Username: <input name='email'> Expiry: <input name='expire' type='date'> <button>Add</button></form>"
+            html += "<table border=1><tr><th>User</th><th>UUID</th><th>Actions</th></tr>"
+            for u in db['users']:
+                html += f"<tr><td>{u['email']}</td><td>{u['uuid']}</td><td><a href='/export?user={u['email']}'>Download JSON</a></td></tr>"
+            html += "</table></body></html>"
+            self.wfile.write(html.encode())
 
+        elif parsed.path == "/export":
+            query = parse_qs(parsed.query)
+            email = query.get('user', [''])[0]
+            db = self.load_db()
+            user = next((u for u in db['users'] if u['email'] == email), None)
+            config = json.load(open(CFG_FILE))
+            
+            if user:
+                payload = {
+                    "outbounds": [{
+                        "protocol": "vless",
+                        "settings": {"vnext": [{"address": config['server_ip'], "port": config['vless_port'], "users": [{"id": user['uuid'], "encryption": "none"}]}]},
+                        "streamSettings": {
+                            "network": "ws",
+                            "security": "none",
+                            "wsSettings": {"path": f"{config['ws_path']}?ed=2048"}
+                        },
+                        "mux": {"enabled": True, "concurrency": 8}
+                    }]
+                }
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Content-Disposition', f'attachment; filename={email}.json')
+                self.end_headers()
+                self.wfile.write(json.dumps(payload, indent=2).encode())
+        else:
+            self.send_error(404)
 
-# ── DB helpers ──────────────────────────────────────────
-def load_db():
-    try:
-        with open(DB) as f:
-            return json.load(f)
-    except Exception:
-        return {"users": []}
+    def do_POST(self):
+        if self.path == "/add":
+            length = int(self.headers.get('Content-Length', 0))
+            data = parse_qs(self.rfile.read(length).decode())
+            db = self.load_db()
+            db['users'].append({
+                "email": data['email'][0],
+                "uuid": str(uuid.uuid4()),
+                "expire": data['expire'][0]
+            })
+            self.save_db(db)
+            self.send_response(303)
+            self.send_header('Location', '/')
+            self.end_headers()
 
-
-def save_db(db):
-    with open(DB, "w") as f:
-        json.dump(db, f, indent=2)
-
-
-def add_user(email, expire, limit):
-    db = load_db()
-    db.setdefault("users", []).append({
-        "email":    email,
-        "uuid":     str(uuid.uuid4()),
-        "created":  datetime.now().strftime("%Y-%m-%d"),
-        "expire":   expire or "unlimited",
-        "limit_gb": float(limit) if limit else 0,
-        "used_gb":  0,
-        "enabled":  True,
-    })
-    save_db(db)
-
-
-def remove_user(email):
-    db = load_db()
-    db["users"] = [u for u in db.get("users", []) if u["email"] != email]
-    save_db(db)
-
-
-# ── Rebuild Xray config (non-TLS WS inbound) ───────────
-def rebuild_xray():
-    db = load_db()
-    clients = [
-        {"id": u["uuid"], "email": u["email"], "level": 0, "flow": ""}
-        for u in db.get("users", []) if u.get("enabled", True)
-    ]
-
-    cfg = {
-        "log": {
-            "loglevel": "warning",
-            "access": "/var/log/xray/access.log",
-            "error":  "/var/log/xray/error.log",
-        },
-        "inbounds": [{
-            "tag": "vless-ws",
-            "port": int(VLESS_PORT),
-            "protocol": "vless",
-            "settings": {"clients": clients, "decryption": "none"},
-            "streamSettings": {
-                "network": "ws",
-                "security": "none",
-                "wsSettings": {"path": WS_PATH},
-            },
-            "sniffing": {"enabled": True, "destOverride": ["http", "tls"]},
-        }],
-        "outbounds": [
-            {"tag": "direct", "protocol": "freedom"},
-            {"tag": "block",  "protocol": "blackhole"},
-        ],
-        "routing": {"rules": [
-            {"type": "field", "ip": ["geoip:private"], "outboundTag": "block"},
-        ]},
-    }
-    try:
-        with open(XRAY_CFG, "w") as f:
-            json.dump(cfg, f, indent=2)
-    except OSError:
-        return  # xray not installed / dir missing — skip reload
+if __name__ == "__main__":
+    os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
+    with socketserver.TCPServer(("", PORT), VlessHandler) as httpd:
+        print(f"Panel running on port {PORT}")
+        httpd.serve_forever()
 
     for cmd in (["systemctl", "reload", "xray"], ["systemctl", "restart", "xray"]):
         try:
