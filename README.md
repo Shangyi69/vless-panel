@@ -2,9 +2,9 @@
 
 VLESS+WS user management web panel — Pure Bash + HTML, no framework
 
-![bash](https://img.shields.io/badge/Backend-Bash_CGI-4EAA25?logo=gnubash&logoColor=white)
+![python](https://img.shields.io/badge/Backend-Python_CGI-3776AB?logo=python&logoColor=white)
 ![db](https://img.shields.io/badge/DB-JSON_file-blue)
-![proto](https://img.shields.io/badge/Protocol-VLESS%2BWS%2BTLS-orange)
+![proto](https://img.shields.io/badge/Protocol-VLESS%2BWS%2Bno--TLS-orange)
 
 ---
 
@@ -21,11 +21,16 @@ VLESS+WS user management web panel — Pure Bash + HTML, no framework
 
 | Component | Tech |
 |-----------|------|
-| Backend   | Bash CGI |
+| Backend   | Python 3 CGI (`panel.cgi`) |
 | Server    | `python3 -m http.server --cgi` |
 | Database  | JSON file (`users.json`) |
-| Protocol  | VLESS + WebSocket + TLS |
-| Mux       | concurrency 8 + Early Data `?ed=2048` |
+| Protocol  | VLESS + WebSocket, **no TLS** (`security: none`) |
+| Mux       | concurrency 8 + Early Data `?ed=2048` (fewer HTTP round-trips) |
+
+> **No TLS by design:** removing TLS drops the cert/handshake overhead
+> entirely, and combined with Mux (fewer underlying HTTP connections) it
+> cuts request/round-trip count further. There's a real trade-off, though —
+> see [Security note](#security-note) below.
 
 ---
 
@@ -34,6 +39,21 @@ VLESS+WS user management web panel — Pure Bash + HTML, no framework
 ```bash
 git clone https://github.com/Shangyi69/vless-panel.git
 cd vless-panel
+```
+
+> **Important:** `setup.sh` copies the panel from `cgi-bin/panel.cgi`, so `panel.cgi`
+> **must** be inside a `cgi-bin/` folder next to `setup.sh` before you run it.
+> If your clone (or download) has `panel.cgi` sitting at the top level instead,
+> fix it first:
+> ```bash
+> mkdir -p cgi-bin
+> mv panel.cgi cgi-bin/panel.cgi
+> ```
+> Skipping this step is the most common cause of a
+> `404 No such CGI script ('/cgi-bin/panel.cgi')` error after setup — `setup.sh`
+> doesn't currently fail loudly if the copy source is missing.
+
+```bash
 sudo bash setup.sh
 ```
 
@@ -42,6 +62,15 @@ Setup ကတောင်းမယ်:
 - WS path (default: `/vless`)
 
 Server IP ကို auto-detect လုပ်တယ်။
+
+If you already ran setup.sh and are hitting the 404, you can fix it in place
+without re-running setup:
+```bash
+sudo mkdir -p /opt/vless-panel/cgi-bin
+sudo cp cgi-bin/panel.cgi /opt/vless-panel/cgi-bin/panel.cgi
+sudo chmod +x /opt/vless-panel/cgi-bin/panel.cgi
+sudo systemctl restart vless-panel
+```
 
 ---
 
@@ -156,9 +185,20 @@ Early Data `?ed=2048` → round-trip တစ်ခု ကုန်သွားတ
 ## Requirements
 
 - Ubuntu 20.04+ / Debian 10+
-- Python 3 (pre-installed)
+- Python 3 (pre-installed) — CGI script has no third-party dependencies
 - Xray-core (installed separately)
-- TLS cert at `/etc/xray/ssl/`
+- No TLS cert needed — this build runs `security: none` on the WS inbound
+
+## Security note
+
+Dropping TLS removes encryption **and** the traffic-shape-hiding that TLS
+gives VLESS+WS (it lets your traffic look like ordinary HTTPS to network
+observers). Without it, VLESS traffic on the wire is easier to fingerprint
+and, since VLESS itself has no built-in encryption, easier to inspect.
+This trade-off is meant for setups where the underlying transport is
+already trusted or wrapped another way (private network, VPN tunnel,
+already-terminated TLS elsewhere) — plan accordingly for public/hostile
+networks.
 
 ---
 

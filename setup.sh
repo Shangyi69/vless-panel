@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
-# setup.sh — VLESS Panel installer
+# setup.sh — VLESS Panel installer (VLESS+WS, no TLS, Mux enabled)
+set -euo pipefail
 
 PANEL_DIR="/opt/vless-panel"
 PANEL_PORT=1190
 
-echo "=== VLESS Panel Setup ==="
+echo "=== VLESS Panel Setup (WS, non-TLS) ==="
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ ! -f "$SCRIPT_DIR/cgi-bin/panel.cgi" ]]; then
+    echo "ERROR: $SCRIPT_DIR/cgi-bin/panel.cgi not found." >&2
+    echo "panel.cgi must sit inside a cgi-bin/ folder next to setup.sh." >&2
+    exit 1
+fi
 
 # Dirs
 mkdir -p "$PANEL_DIR/cgi-bin" "$PANEL_DIR/data"
@@ -28,7 +36,6 @@ cat > "$PANEL_DIR/data/users.json" <<'EOF'
 EOF
 
 # Copy CGI
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cp "$SCRIPT_DIR/cgi-bin/panel.cgi" "$PANEL_DIR/cgi-bin/panel.cgi"
 chmod +x "$PANEL_DIR/cgi-bin/panel.cgi"
 

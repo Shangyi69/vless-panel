@@ -1,185 +1,176 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 # ══════════════════════════════════════════════════════
-#  VLESS+WS Web Panel  —  Bash CGI
-#  DB : JSON file
-#  Server : python3 -m http.server --cgi
+#  VLESS+WS Web Panel  —  Python CGI
+#  DB       : JSON file
+#  Server   : python3 -m http.server --cgi
+#  Protocol : VLESS + WebSocket, NO TLS (security: none)
+#  Mux      : concurrency 8 (fewer HTTP round-trips)
 # ══════════════════════════════════════════════════════
+import os
+import sys
+import json
+import uuid
+import subprocess
+from datetime import datetime, date
+from urllib.parse import parse_qs, quote
 
-DB="/opt/vless-panel/data/users.json"
-CFG="/opt/vless-panel/data/config.json"
-XRAY_CFG="/usr/local/etc/xray/config.json"
-SSL_DIR="/etc/xray/ssl"
+DB        = "/opt/vless-panel/data/users.json"
+CFG       = "/opt/vless-panel/data/config.json"
+XRAY_CFG  = "/usr/local/etc/xray/config.json"
+
 
 # ── Config helpers ─────────────────────────────────────
-cfg_get() {
-    python3 -c "
-import json
-try:
-    c = json.load(open('$CFG'))
-    print(c.get('$1', '$2'))
-except:
-    print('$2')
-" 2>/dev/null
-}
+def cfg_get(key, default=""):
+    try:
+        with open(CFG) as f:
+            c = json.load(f)
+        return c.get(key, default)
+    except Exception:
+        return default
 
-SERVER_IP=$(cfg_get server_ip "")
-VLESS_PORT=$(cfg_get vless_port "443")
-WS_PATH=$(cfg_get ws_path "/vless")
 
-# ── Request parsing ────────────────────────────────────
-ACTION=$(echo "$QUERY_STRING" | tr '&' '\n' | grep '^action=' | cut -d= -f2)
+SERVER_IP   = cfg_get("server_ip", "")
+VLESS_PORT  = cfg_get("vless_port", 443)
+WS_PATH     = cfg_get("ws_path", "/vless")
 
-read_post() {
-    if [[ "$REQUEST_METHOD" == "POST" && -n "$CONTENT_LENGTH" ]]; then
-        POST_DATA=$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)
-    fi
-}
 
-post_val() {
-    echo "$POST_DATA" | tr '&' '\n' | grep "^$1=" | cut -d= -f2- \
-    | python3 -c "import sys,urllib.parse; print(urllib.parse.unquote_plus(sys.stdin.read().strip()))"
-}
+# ── DB helpers ──────────────────────────────────────────
+def load_db():
+    try:
+        with open(DB) as f:
+            return json.load(f)
+    except Exception:
+        return {"users": []}
 
-get_val() {
-    echo "$QUERY_STRING" | tr '&' '\n' | grep "^$1=" | cut -d= -f2- \
-    | python3 -c "import sys,urllib.parse; print(urllib.parse.unquote_plus(sys.stdin.read().strip()))"
-}
 
-# ── DB operations ──────────────────────────────────────
-add_user() {
-    local email="$1" expire="$2" limit="$3"
-    python3 - "$DB" "$email" "$expire" "$limit" <<'PY'
-import sys, json
-from datetime import datetime
-db_f, email, expire, limit = sys.argv[1:]
-import uuid
-with open(db_f) as f: db = json.load(f)
-db['users'].append({
-    "email": email,
-    "uuid": str(uuid.uuid4()),
-    "created": datetime.now().strftime("%Y-%m-%d"),
-    "expire": expire or "unlimited",
-    "limit_gb": float(limit) if limit else 0,
-    "used_gb": 0,
-    "enabled": True
-})
-with open(db_f,'w') as f: json.dump(db, f, indent=2)
-PY
-}
+def save_db(db):
+    with open(DB, "w") as f:
+        json.dump(db, f, indent=2)
 
-remove_user() {
-    local email="$1"
-    python3 - "$DB" "$email" <<'PY'
-import sys, json
-db_f, email = sys.argv[1:]
-with open(db_f) as f: db = json.load(f)
-db['users'] = [u for u in db['users'] if u['email'] != email]
-with open(db_f,'w') as f: json.dump(db, f, indent=2)
-PY
-}
 
-# ── Rebuild Xray config ────────────────────────────────
-rebuild_xray() {
-    python3 - "$DB" "$XRAY_CFG" "$SSL_DIR" "$VLESS_PORT" "$WS_PATH" <<'PY'
-import sys, json
-db_f, cfg_f, ssl_dir, port, path = sys.argv[1:]
-with open(db_f) as f: db = json.load(f)
+def add_user(email, expire, limit):
+    db = load_db()
+    db.setdefault("users", []).append({
+        "email":    email,
+        "uuid":     str(uuid.uuid4()),
+        "created":  datetime.now().strftime("%Y-%m-%d"),
+        "expire":   expire or "unlimited",
+        "limit_gb": float(limit) if limit else 0,
+        "used_gb":  0,
+        "enabled":  True,
+    })
+    save_db(db)
 
-clients = [
-    {"id": u["uuid"], "email": u["email"], "level": 0, "flow": ""}
-    for u in db.get("users", []) if u.get("enabled", True)
-]
 
-cfg = {
-    "log": {"loglevel": "warning",
+def remove_user(email):
+    db = load_db()
+    db["users"] = [u for u in db.get("users", []) if u["email"] != email]
+    save_db(db)
+
+
+# ── Rebuild Xray config (non-TLS WS inbound) ───────────
+def rebuild_xray():
+    db = load_db()
+    clients = [
+        {"id": u["uuid"], "email": u["email"], "level": 0, "flow": ""}
+        for u in db.get("users", []) if u.get("enabled", True)
+    ]
+
+    cfg = {
+        "log": {
+            "loglevel": "warning",
             "access": "/var/log/xray/access.log",
-            "error":  "/var/log/xray/error.log"},
-    "inbounds": [{
-        "tag": "vless-ws",
-        "port": int(port),
-        "protocol": "vless",
-        "settings": {"clients": clients, "decryption": "none"},
-        "streamSettings": {
-            "network": "ws",
-            "security": "tls",
-            "tlsSettings": {"certificates": [{
-                "certificateFile": f"{ssl_dir}/cert.pem",
-                "keyFile":         f"{ssl_dir}/key.pem"
-            }]},
-            "wsSettings": {"path": path}
+            "error":  "/var/log/xray/error.log",
         },
-        "sniffing": {"enabled": True, "destOverride": ["http","tls"]}
-    }],
-    "outbounds": [
-        {"tag": "direct", "protocol": "freedom"},
-        {"tag": "block",  "protocol": "blackhole"}
-    ],
-    "routing": {"rules": [
-        {"type":"field","ip":["geoip:private"],"outboundTag":"block"}
-    ]}
-}
-with open(cfg_f,'w') as f: json.dump(cfg, f, indent=2)
-PY
-    systemctl reload xray 2>/dev/null || systemctl restart xray 2>/dev/null || true
-}
-
-# ── Client JSON export (Mux + Early Data) ─────────────
-client_json() {
-    local email="$1"
-    python3 - "$DB" "$email" "$SERVER_IP" "$VLESS_PORT" "$WS_PATH" <<'PY'
-import sys, json
-db_f, email, ip, port, path = sys.argv[1:]
-with open(db_f) as f: db = json.load(f)
-users = [u for u in db['users'] if u['email'] == email]
-if not users: sys.exit(1)
-u = users[0]
-out = {
-    "log": {"loglevel": "warning"},
-    "inbounds": [
-        {"tag":"socks","port":10808,"protocol":"socks",
-         "settings":{"auth":"noauth","udp":True}},
-        {"tag":"http","port":10809,"protocol":"http",
-         "settings":{}}
-    ],
-    "outbounds": [
-        {
-            "tag": "proxy",
+        "inbounds": [{
+            "tag": "vless-ws",
+            "port": int(VLESS_PORT),
             "protocol": "vless",
-            "settings": {
-                "vnext": [{
-                    "address": ip,
-                    "port": int(port),
-                    "users": [{
-                        "id": u["uuid"],
-                        "encryption": "none",
-                        "level": 0
-                    }]
-                }]
-            },
+            "settings": {"clients": clients, "decryption": "none"},
             "streamSettings": {
                 "network": "ws",
-                "security": "tls",
-                "tlsSettings": {"allowInsecure": True, "serverName": ip},
-                "wsSettings": {"path": path + "?ed=2048", "headers": {}}
+                "security": "none",
+                "wsSettings": {"path": WS_PATH},
             },
-            "mux": {"enabled": True, "concurrency": 8}
-        },
-        {"tag":"direct","protocol":"freedom"},
-        {"tag":"block", "protocol":"blackhole"}
-    ],
-    "routing": {
-        "domainStrategy": "IPIfNonMatch",
-        "rules": [{"type":"field","outboundTag":"direct","ip":["geoip:private"]}]
+            "sniffing": {"enabled": True, "destOverride": ["http", "tls"]},
+        }],
+        "outbounds": [
+            {"tag": "direct", "protocol": "freedom"},
+            {"tag": "block",  "protocol": "blackhole"},
+        ],
+        "routing": {"rules": [
+            {"type": "field", "ip": ["geoip:private"], "outboundTag": "block"},
+        ]},
     }
-}
-print(json.dumps(out, indent=2, ensure_ascii=False))
-PY
-}
+    try:
+        with open(XRAY_CFG, "w") as f:
+            json.dump(cfg, f, indent=2)
+    except OSError:
+        return  # xray not installed / dir missing — skip reload
 
-# ══════════════════════════════════════════════════════
-#  HTML / CSS
-# ══════════════════════════════════════════════════════
-CSS='
+    for cmd in (["systemctl", "reload", "xray"], ["systemctl", "restart", "xray"]):
+        try:
+            subprocess.run(cmd, check=True,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            break
+        except Exception:
+            continue
+
+
+# ── Client JSON export (non-TLS, Mux + Early Data) ─────
+def client_json(email):
+    db = load_db()
+    users = [u for u in db.get("users", []) if u["email"] == email]
+    if not users:
+        return None
+    u = users[0]
+
+    out = {
+        "log": {"loglevel": "warning"},
+        "inbounds": [
+            {"tag": "socks", "port": 10808, "protocol": "socks",
+             "settings": {"auth": "noauth", "udp": True}},
+            {"tag": "http", "port": 10809, "protocol": "http",
+             "settings": {}},
+        ],
+        "outbounds": [
+            {
+                "tag": "proxy",
+                "protocol": "vless",
+                "settings": {
+                    "vnext": [{
+                        "address": SERVER_IP,
+                        "port": int(VLESS_PORT),
+                        "users": [{
+                            "id": u["uuid"],
+                            "encryption": "none",
+                            "level": 0,
+                        }],
+                    }],
+                },
+                "streamSettings": {
+                    "network": "ws",
+                    "security": "none",
+                    "wsSettings": {
+                        "path": WS_PATH + "?ed=2048",
+                        "headers": {"Host": SERVER_IP},
+                    },
+                },
+                "mux": {"enabled": True, "concurrency": 8},
+            },
+            {"tag": "direct", "protocol": "freedom"},
+            {"tag": "block",  "protocol": "blackhole"},
+        ],
+        "routing": {
+            "domainStrategy": "IPIfNonMatch",
+            "rules": [{"type": "field", "outboundTag": "direct", "ip": ["geoip:private"]}],
+        },
+    }
+    return json.dumps(out, indent=2, ensure_ascii=False)
+
+
+# ── HTML / CSS ──────────────────────────────────────────
+CSS = """
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,sans-serif;background:#0d1117;color:#c9d1d9;min-height:100vh}
 .nav{background:#161b22;padding:.9rem 2rem;border-bottom:1px solid #21262d;display:flex;align-items:center;gap:.8rem}
@@ -217,96 +208,90 @@ input:focus{outline:none;border-color:#58a6ff}
 code{font-size:.75rem;color:#8b949e;font-family:monospace}
 .bar-wrap{background:#21262d;border-radius:3px;height:5px;width:80px;display:inline-block;vertical-align:middle;margin-left:4px}
 .bar-fill{height:100%;border-radius:3px}
-'
+"""
 
-# ── Render user table rows ─────────────────────────────
-user_rows() {
-    python3 - "$DB" <<'PY'
-import json, sys
-from datetime import datetime, date
 
-try:
-    db = json.load(open(sys.argv[1]))
-    users = db.get('users', [])
-except:
-    users = []
+def esc(s):
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
 
-if not users:
-    print('<tr><td colspan="6" style="text-align:center;color:#6e7681;padding:2rem">No users yet</td></tr>')
-    sys.exit()
 
-for u in users:
-    em    = u.get('email','?')
-    uid   = u.get('uuid','?')
-    cre   = u.get('created','?')
-    exp   = u.get('expire','unlimited')
-    used  = float(u.get('used_gb', 0))
-    limit = float(u.get('limit_gb', 0))
+def user_rows():
+    db = load_db()
+    users = db.get("users", [])
+    if not users:
+        return '<tr><td colspan="6" style="text-align:center;color:#6e7681;padding:2rem">No users yet</td></tr>'
 
-    # expire tag
-    if not exp or exp in ('0','unlimited',''):
-        exp_h = '<span class="tag ok">∞ No limit</span>'
-    else:
-        try:
-            d = datetime.strptime(exp,'%Y-%m-%d').date()
-            diff = (d - date.today()).days
-            if diff < 0:
-                exp_h = f'<span class="tag exp">Expired {-diff}d</span>'
-            elif diff <= 7:
-                exp_h = f'<span class="tag warn">{diff}d left</span>'
-            else:
-                exp_h = f'<span class="tag ok">{exp}</span>'
-        except:
-            exp_h = f'<span class="tag ok">{exp}</span>'
+    rows = []
+    for u in users:
+        em    = esc(u.get("email", "?"))
+        uid   = esc(u.get("uuid", "?"))
+        cre   = esc(u.get("created", "?"))
+        exp   = u.get("expire", "unlimited")
+        used  = float(u.get("used_gb", 0))
+        limit = float(u.get("limit_gb", 0))
 
-    # traffic bar
-    if limit <= 0:
-        tr_h = f'<span style="color:#6e7681">{used:.1f} GB / ∞</span>'
-    else:
-        pct = min(used/limit*100, 100)
-        col = '#f85149' if pct>90 else '#d29922' if pct>70 else '#3fb950'
-        tr_h = (f'{used:.1f}/{limit:.0f}G'
-                f'<span class="bar-wrap"><span class="bar-fill" style="background:{col};width:{pct:.0f}%"></span></span>')
+        if not exp or exp in ("0", "unlimited", ""):
+            exp_h = '<span class="tag ok">∞ No limit</span>'
+        else:
+            try:
+                d = datetime.strptime(exp, "%Y-%m-%d").date()
+                diff = (d - date.today()).days
+                if diff < 0:
+                    exp_h = f'<span class="tag exp">Expired {-diff}d</span>'
+                elif diff <= 7:
+                    exp_h = f'<span class="tag warn">{diff}d left</span>'
+                else:
+                    exp_h = f'<span class="tag ok">{esc(exp)}</span>'
+            except Exception:
+                exp_h = f'<span class="tag ok">{esc(exp)}</span>'
 
-    print(f'''
+        if limit <= 0:
+            tr_h = f'<span style="color:#6e7681">{used:.1f} GB / \u221e</span>'
+        else:
+            pct = min(used / limit * 100, 100)
+            col = "#f85149" if pct > 90 else "#d29922" if pct > 70 else "#3fb950"
+            tr_h = (f'{used:.1f}/{limit:.0f}G'
+                    f'<span class="bar-wrap"><span class="bar-fill" '
+                    f'style="background:{col};width:{pct:.0f}%"></span></span>')
+
+        em_q = quote(em)
+        rows.append(f'''
 <tr>
   <td><strong>{em}</strong></td>
-  <td><code>{uid[:20]}…</code></td>
+  <td><code>{uid[:20]}\u2026</code></td>
   <td style="color:#6e7681;font-size:.78rem">{cre}</td>
   <td>{exp_h}</td>
   <td>{tr_h}</td>
   <td>
-    <a href="/cgi-bin/panel.cgi?action=export&user={em}"
-       class="btn dl btn-sm">⬇ JSON</a>
+    <a href="/cgi-bin/panel.cgi?action=export&user={em_q}"
+       class="btn dl btn-sm">\u2b07 JSON</a>
     &nbsp;
     <form method="POST" action="/cgi-bin/panel.cgi?action=remove"
           style="display:inline"
           onsubmit="return confirm('Remove {em}?')">
       <input type="hidden" name="email" value="{em}">
-      <button class="btn del btn-sm">✕</button>
+      <button class="btn del btn-sm">\u2715</button>
     </form>
   </td>
 </tr>''')
-PY
-}
+    return "".join(rows)
 
-# ── Page: Main ─────────────────────────────────────────
-page_main() {
-    printf "Content-Type: text/html; charset=utf-8\r\n\r\n"
-    cat <<HTML
-<!DOCTYPE html>
+
+def page_main():
+    html = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>VLESS Panel</title>
-<style>$CSS</style>
+<style>{CSS}</style>
 </head>
 <body>
 <nav class="nav">
-  <h1>⚡ VLESS Panel</h1>
-  <span class="badge">WS · TLS · Mux</span>
-  <span class="srv">${SERVER_IP}:${VLESS_PORT}${WS_PATH}</span>
+  <h1>\u26a1 VLESS Panel</h1>
+  <span class="badge">WS \u00b7 no-TLS \u00b7 Mux</span>
+  <span class="srv">{esc(SERVER_IP)}:{esc(VLESS_PORT)}{esc(WS_PATH)}</span>
 </nav>
 <div class="wrap">
 
@@ -323,7 +308,7 @@ page_main() {
         <input type="date" name="expire">
       </div>
       <div class="fg">
-        <label>Traffic Limit GB (0=∞)</label>
+        <label>Traffic Limit GB (0=\u221e)</label>
         <input type="number" name="limit_gb" value="0" min="0" step="1">
       </div>
       <div class="fg">
@@ -348,51 +333,82 @@ page_main() {
       </tr>
     </thead>
     <tbody>
-$(user_rows)
+{user_rows()}
     </tbody>
   </table>
 </div>
 
 </div>
 </body>
-</html>
-HTML
-}
+</html>'''
+    sys.stdout.write("Content-Type: text/html; charset=utf-8\r\n\r\n")
+    sys.stdout.write(html)
 
-# ── Action: Add ────────────────────────────────────────
-action_add() {
-    read_post
-    local email; email=$(post_val email)
-    local expire; expire=$(post_val expire)
-    local limit;  limit=$(post_val limit_gb)
-    [[ -n "$email" ]] && add_user "$email" "$expire" "$limit"
-    rebuild_xray
-    printf "Content-Type: text/html\r\n\r\n"
-    echo '<meta http-equiv="refresh" content="0;url=/cgi-bin/panel.cgi">'
-}
 
-# ── Action: Remove ─────────────────────────────────────
-action_remove() {
-    read_post
-    local email; email=$(post_val email)
-    [[ -n "$email" ]] && remove_user "$email"
-    rebuild_xray
-    printf "Content-Type: text/html\r\n\r\n"
-    echo '<meta http-equiv="refresh" content="0;url=/cgi-bin/panel.cgi">'
-}
+# ── Request plumbing ────────────────────────────────────
+def read_post():
+    length = int(os.environ.get("CONTENT_LENGTH") or 0)
+    if os.environ.get("REQUEST_METHOD") == "POST" and length:
+        raw = sys.stdin.buffer.read(length).decode("utf-8", "replace")
+        return parse_qs(raw)
+    return {}
 
-# ── Action: Export JSON ────────────────────────────────
-action_export() {
-    local email; email=$(get_val user)
-    printf "Content-Type: application/json\r\n"
-    printf "Content-Disposition: attachment; filename=\"%s_vless.json\"\r\n\r\n" "$email"
-    client_json "$email"
-}
 
-# ── Router ─────────────────────────────────────────────
-case "${REQUEST_METHOD:-GET}:${ACTION}" in
-    POST:add)     action_add ;;
-    POST:remove)  action_remove ;;
-    GET:export)   action_export ;;
-    *)            page_main ;;
-esac
+def qval(d, key, default=""):
+    v = d.get(key)
+    return v[0] if v else default
+
+
+def action_add():
+    post = read_post()
+    email  = qval(post, "email")
+    expire = qval(post, "expire")
+    limit  = qval(post, "limit_gb")
+    if email:
+        add_user(email, expire, limit)
+        rebuild_xray()
+    sys.stdout.write("Content-Type: text/html\r\n\r\n")
+    sys.stdout.write('<meta http-equiv="refresh" content="0;url=/cgi-bin/panel.cgi">')
+
+
+def action_remove():
+    post = read_post()
+    email = qval(post, "email")
+    if email:
+        remove_user(email)
+        rebuild_xray()
+    sys.stdout.write("Content-Type: text/html\r\n\r\n")
+    sys.stdout.write('<meta http-equiv="refresh" content="0;url=/cgi-bin/panel.cgi">')
+
+
+def action_export():
+    qs = parse_qs(os.environ.get("QUERY_STRING", ""))
+    email = qval(qs, "user")
+    payload = client_json(email)
+    if payload is None:
+        sys.stdout.write("Status: 404 Not Found\r\nContent-Type: text/plain\r\n\r\nUser not found")
+        return
+    sys.stdout.write("Content-Type: application/json\r\n")
+    sys.stdout.write(f'Content-Disposition: attachment; filename="{email}_vless.json"\r\n\r\n')
+    sys.stdout.write(payload)
+
+
+def main():
+    method = os.environ.get("REQUEST_METHOD", "GET")
+    qs = parse_qs(os.environ.get("QUERY_STRING", ""))
+    action = qval(qs, "action")
+
+    if method == "POST" and action == "add":
+        action_add()
+    elif method == "POST" and action == "remove":
+        action_remove()
+    elif method == "GET" and action == "export":
+        action_export()
+    else:
+        page_main()
+
+    sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()
