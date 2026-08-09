@@ -1,12 +1,10 @@
-#!/usr/init/env python3
-import http.server, socketserver, json, uuid, os, subprocess
-from urllib.parse import parse_qs, urlparse
+#!/usr/bin/env python3
+import http.server, socketserver, json, uuid, os
 
 PORT = 1190
 BASE_DIR = "/opt/vless-panel"
 DB_FILE = os.path.join(BASE_DIR, "data/users.json")
 CFG_FILE = os.path.join(BASE_DIR, "data/config.json")
-XRAY_CFG = "/usr/local/etc/xray/config.json"
 
 class VlessHandler(http.server.SimpleHTTPRequestHandler):
     def load_db(self):
@@ -14,10 +12,11 @@ class VlessHandler(http.server.SimpleHTTPRequestHandler):
         with open(DB_FILE, 'r') as f: return json.load(f)
 
     def save_db(self, db):
+        os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
         with open(DB_FILE, 'w') as f: json.dump(db, f, indent=4)
 
     def load_cfg(self):
-        default_cfg = {"server_ip": "127.0.0.1", "vless_port": 80, "ws_path": "/", "host": "d36lt9hzl2ug3d.cloudfront.net"}
+        default_cfg = {"server_ip": "119.10.137.32", "vless_port": 80, "ws_path": "/", "host": "d36lt9hzl2ug3d.cloudfront.net"}
         if not os.path.exists(CFG_FILE): return default_cfg
         with open(CFG_FILE, 'r') as f: return {**default_cfg, **json.load(f)}
 
@@ -26,10 +25,12 @@ class VlessHandler(http.server.SimpleHTTPRequestHandler):
         with open(CFG_FILE, 'w') as f: json.dump(cfg, f, indent=4)
 
     def do_GET(self):
-        parsed = urlparse(self.path)
-        if parsed.path == "/":
+        parsed = self.path.split('?')
+        path = parsed[0]
+        
+        if path == "/":
             self.send_response(200)
-            self.send_header('Content-type', 'text/html')
+            self.send_header('Content-type', 'text/html; charset=utf-8')
             self.end_headers()
             db = self.load_db()
             config = self.load_cfg()
@@ -40,73 +41,150 @@ class VlessHandler(http.server.SimpleHTTPRequestHandler):
 <title>VLESS Web Panel</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px; }}
-  .container {{ max-width: 1000px; margin: auto; background: #1e293b; padding: 25px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }}
-  h2, h3 {{ color: #38bdf8; border-bottom: 2px solid #334155; padding-bottom: 8px; }}
-  .card {{ background: #0f172a; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #334155; }}
-  input, select {{ background: #1e293b; border: 1px solid #475569; color: #fff; padding: 10px; border-radius: 6px; margin: 5px 0; width: 100%; box-sizing: border-box; }}
-  button {{ background: #0284c7; color: white; border: none; padding: 10px 15px; cursor: pointer; border-radius: 6px; font-weight: bold; width: 100%; }}
+  body {{ font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 15px; }}
+  .container {{ max-width: 800px; margin: auto; background: #1e293b; padding: 20px; border-radius: 8px; }}
+  h2, h3 {{ color: #38bdf8; border-bottom: 1px solid #334155; padding-bottom: 5px; }}
+  .card {{ background: #0f172a; padding: 15px; border-radius: 6px; margin-bottom: 15px; border: 1px solid #334155; }}
+  input {{ background: #1e293b; border: 1px solid #475569; color: #fff; padding: 8px; border-radius: 4px; margin: 5px 0; width: 100%; box-sizing: border-box; }}
+  button {{ background: #0284c7; color: white; border: none; padding: 10px; cursor: pointer; border-radius: 4px; font-weight: bold; width: 100%; }}
   button:hover {{ background: #0369a1; }}
-  table {{ width: 100%; border-collapse: collapse; margin-top: 15px; }}
-  th, td {{ padding: 12px; border-bottom: 1px solid #334155; text-align: left; font-size: 14px; }}
+  table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+  th, td {{ padding: 10px; border-bottom: 1px solid #334155; text-align: left; font-size: 13px; }}
   th {{ background: #334155; color: #cbd5e1; }}
-  .btn-sm {{ padding: 6px 10px; font-size: 12px; border-radius: 4px; text-decoration: none; display: inline-block; }}
+  .btn-sm {{ padding: 5px 8px; font-size: 12px; border-radius: 3px; text-decoration: none; display: inline-block; }}
   .btn-dl {{ background: #10b981; color: white; }}
   .btn-del {{ background: #ef4444; color: white; }}
-  .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }}
+  .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
 </style>
 </head>
 <body>
 <div class="container">
-    <h2>⚡ VLESS Web Panel (Transport & Config Control)</h2>
+    <h2>⚡ VLESS Web Panel</h2>
     
     <div class="card">
-        <h3>⚙️ Inbound / Transport Config (Xray Settings)</h3>
+        <h3>⚙️ Transport & Config Settings</h3>
         <form action='/update-config' method='POST'>
             <div class="grid">
-                <div>
-                    <label>Server Address / Domain:</label>
-                    <input type="text" name="server_ip" value="{config.get('server_ip', '')}">
-                </div>
-                <div>
-                    <label>Port:</label>
-                    <input type="number" name="vless_port" value="{config.get('vless_port', 80)}">
-                </div>
-                <div>
-                    <label>Path:</label>
-                    <input type="text" name="ws_path" value="{config.get('ws_path', '/')}">
-                </div>
-                <div>
-                    <label>Host Header (CloudFront/CDN):</label>
-                    <input type="text" name="host" value="{config.get('host', '')}">
-                </div>
+                <div><label>Address / IP:</label><input type="text" name="server_ip" value="{config.get('server_ip', '')}"></div>
+                <div><label>Port:</label><input type="number" name="vless_port" value="{config.get('vless_port', 80)}"></div>
+                <div><label>Path:</label><input type="text" name="ws_path" value="{config.get('ws_path', '/')}"></div>
+                <div><label>Host Header:</label><input type="text" name="host" value="{config.get('host', '')}"></div>
             </div>
-            <button type="submit" style="margin-top: 10px; background: #0d9488;">Save & Update Config</button>
+            <button type="submit" style="margin-top: 10px; background: #0d9488;">Save Config</button>
         </form>
     </div>
 
     <div class="card">
-        <h3>➕ Add New User</h3>
+        <h3>➕ Add User</h3>
         <form action='/add' method='POST'>
-            <div class="grid">
-                <div><input type="text" name="email" placeholder="Username / Remark" required></div>
-                <div><input type="date" name="expire"></div>
-            </div>
-            <button type="submit" style="margin-top: 10px;">Create User</button>
+            <input type="text" name="email" placeholder="Username / Remark" required>
+            <button type="submit" style="margin-top: 5px;">Create User</button>
         </form>
     </div>
 
     <div class="card">
-        <h3>👥 User List</h3>
+        <h3>👥 Users List</h3>
         <table>
-            <tr><th>Username</th><th>UUID</th><th>Expiry</th><th>Actions</th></tr>"""
+            <tr><th>Name</th><th>UUID</th><th>Actions</th></tr>"""
             
             for u in db['users']:
-                html += f"<tr><td><b>{u['email']}</b></td><td><code>{u['uuid']}</code></td><td>{u.get('expire', 'Unlimited')}</td><td><a href='/export?user={u['email']}' class='btn-sm btn-dl'>⬇ JSON</a> <a href='/remove?email={u['email']}' class='btn-sm btn-del' onclick='return confirm(\"Delete?\")'>✕ Delete</a></td></tr>"
+                html += f"<tr><td>{u['email']}</td><td><code style='font-size:11px;'>{u['uuid']}</code></td><td><a href='/export?user={u['email']}' class='btn-sm btn-dl'>JSON</a> <a href='/remove?email={u['email']}' class='btn-sm btn-del' onclick='return confirm(\"Delete?\")'>X</a></td></tr>"
             
             html += """</table></div></div></body></html>"""
             self.wfile.write(html.encode())
 
+        elif path == "/export":
+            query = {}
+            if len(parsed) > 1:
+                for q in parsed[1].split('&'):
+                    parts = q.split('=')
+                    if len(parts) == 2: query[parts[0]] = parts[1]
+            
+            email = query.get('user', '')
+            db = self.load_db()
+            user = next((u for u in db['users'] if u['email'] == email), None)
+            config = self.load_cfg()
+            
+            if user:
+                payload = {
+                    "log": {"loglevel": "warning"},
+                    "outbounds": [{
+                        "protocol": "vless",
+                        "settings": {
+                            "vnext": [{
+                                "address": config['server_ip'],
+                                "port": int(config['vless_port']),
+                                "users": [{"id": user['uuid'], "encryption": "none", "flow": "", "level": 8}]
+                            }]
+                        },
+                        "streamSettings": {
+                            "network": "ws",
+                            "security": "none",
+                            "wsSettings": {
+                                "path": config['ws_path'],
+                                "headers": {"Host": config['host']}
+                            }
+                        },
+                        "mux": {"enabled": False, "concurrency": -1}
+                    }],
+                    "routing": {"domainStrategy": "AsIs", "rules": []}
+                }
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Content-Disposition', f'attachment; filename={email}.json')
+                self.end_headers()
+                self.wfile.write(json.dumps(payload, indent=2).encode())
+        
+        elif path == "/remove":
+            query = {}
+            if len(parsed) > 1:
+                for q in parsed[1].split('&'):
+                    parts = q.split('=')
+                    if len(parts) == 2: query[parts[0]] = parts[1]
+            email = query.get('email', '')
+            db = self.load_db()
+            db['users'] = [u for u in db['users'] if u['email'] != email]
+            self.save_db(db)
+            self.send_response(303)
+            self.send_header('Location', '/')
+            self.end_headers()
+        else:
+            self.send_error(404)
+
+    def do_POST(self):
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length).decode()
+        data = {}
+        for item in body.split('&'):
+            parts = item.split('=')
+            if len(parts) == 2:
+                import urllib.parse
+                data[parts[0]] = urllib.parse.unquote_plus(parts[1])
+
+        if self.path == "/add":
+            db = self.load_db()
+            db['users'].append({
+                "email": data.get('email', 'user'),
+                "uuid": str(uuid.uuid4())
+            })
+            self.save_db(db)
+        elif self.path == "/update-config":
+            cfg = self.load_cfg()
+            cfg['server_ip'] = data.get('server_ip', cfg['server_ip'])
+            cfg['vless_port'] = int(data.get('vless_port', cfg['vless_port']))
+            cfg['ws_path'] = data.get('ws_path', cfg['ws_path'])
+            cfg['host'] = data.get('host', cfg['host'])
+            self.save_cfg(cfg)
+
+        self.send_response(303)
+        self.send_header('Location', '/')
+        self.end_headers()
+
+if __name__ == "__main__":
+    os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
+    with socketserver.TCPServer(("", PORT), VlessHandler) as httpd:
+        print(f"Panel running on port {PORT}")
+        httpd.serve_forever()
         elif parsed.path == "/export":
             query = parse_qs(parsed.query)
             email = query.get('user', [''])[0]
