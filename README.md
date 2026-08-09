@@ -1,105 +1,61 @@
-# vless-panel
+#!/usr/bin/env bash
+set -euo pipefail
 
-VLESS+WS user management web panel — Pure Bash + HTML, no framework
+PANEL_DIR="/opt/vless-panel"
+PANEL_PORT=1190
 
-![python](https://img.shields.io/badge/Backend-Python_CGI-3776AB?logo=python&logoColor=white)
-![db](https://img.shields.io/badge/DB-JSON_file-blue)
-![proto](https://img.shields.io/badge/Protocol-VLESS%2BWS%2Bno--TLS-orange)
+echo "=== VLESS Panel Setup (Native Python) ==="
 
----
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ ! -f "$SCRIPT_DIR/panel.py" ]]; then
+    echo "ERROR: panel.py not found in $SCRIPT_DIR" >&2
+    exit 1
+fi
 
-## Features
+mkdir -p "$PANEL_DIR/data"
 
-- User add / remove / list
-- Expire date per user (auto color: green / yellow / red)
-- Traffic limit per user (GB, with visual bar)
-- Client JSON export — **Mux + Early Data** ပါပြီ (v2rayNG / NekoBox import ရုံပဲ)
-- Xray config auto-rebuild on every change
-- Accessible via Chrome browser
+SERVER_IP=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
+read -rp "VLESS port [443]: " VLESS_PORT; VLESS_PORT="${VLESS_PORT:-443}"
+read -rp "WS path [/vless]: " WS_PATH;   WS_PATH="${WS_PATH:-/vless}"
 
-## Stack
+cat > "$PANEL_DIR/data/config.json" <<EOF
+{
+  "server_ip":   "$SERVER_IP",
+  "vless_port":  $VLESS_PORT,
+  "ws_path":     "$WS_PATH"
+}
+EOF
 
-| Component | Tech |
-|-----------|------|
-| Backend   | Python 3 CGI (`panel.cgi`) |
-| Server    | `python3 -m http.server --cgi` |
-| Database  | JSON file (`users.json`) |
-| Protocol  | VLESS + WebSocket, **no TLS** (`security: none`) |
-| Mux       | concurrency 8 + Early Data `?ed=2048` (fewer HTTP round-trips) |
+if [[ ! -f "$PANEL_DIR/data/users.json" ]]; then
+    echo '{"users": []}' > "$PANEL_DIR/data/users.json"
+fi
 
-> **No TLS by design:** removing TLS drops the cert/handshake overhead
-> entirely, and combined with Mux (fewer underlying HTTP connections) it
-> cuts request/round-trip count further. There's a real trade-off, though —
-> see [Security note](#security-note) below.
+cp "$SCRIPT_DIR/panel.py" "$PANEL_DIR/panel.py"
+chmod +x "$PANEL_DIR/panel.py"
 
----
+cat > /etc/systemd/system/vless-panel.service <<EOF
+[Unit]
+Description=VLESS Web Panel
+After=network.target
 
-## Install
+[Service]
+Type=simple
+WorkingDirectory=$PANEL_DIR
+ExecStart=/usr/bin/python3 $PANEL_DIR/panel.py
+Restart=always
+RestartSec=3
 
-```bash
-git clone https://github.com/Shangyi69/vless-panel.git
-cd vless-panel
-```
+[Install]
+WantedBy=multi-user.target
+EOF
 
-> **Important:** `setup.sh` copies the panel from `cgi-bin/panel.cgi`, so `panel.cgi`
-> **must** be inside a `cgi-bin/` folder next to `setup.sh` before you run it.
-> If your clone (or download) has `panel.cgi` sitting at the top level instead,
-> fix it first:
-> ```bash
-> mkdir -p cgi-bin
-> mv panel.cgi cgi-bin/panel.cgi
-> ```
-> Skipping this step is the most common cause of a
-> `404 No such CGI script ('/cgi-bin/panel.cgi')` error after setup — `setup.sh`
-> doesn't currently fail loudly if the copy source is missing.
+systemctl daemon-reload
+systemctl enable vless-panel
+systemctl restart vless-panel
 
-```bash
-sudo bash setup.sh
-```
+ufw allow "$PANEL_PORT/tcp" 2>/dev/null || true
 
-Setup ကတောင်းမယ်:
-- VLESS port (default: `443`)
-- WS path (default: `/vless`)
-
-Server IP ကို auto-detect လုပ်တယ်။
-
-If you already ran setup.sh and are hitting the 404, you can fix it in place
-without re-running setup:
-```bash
-sudo mkdir -p /opt/vless-panel/cgi-bin
-sudo cp cgi-bin/panel.cgi /opt/vless-panel/cgi-bin/panel.cgi
-sudo chmod +x /opt/vless-panel/cgi-bin/panel.cgi
-sudo systemctl restart vless-panel
-```
-
----
-
-## Access
-
-```
-http://YOUR_VPS_IP:1190
-```
-
-Panel port default: **1190**
-
----
-
-## Usage
-
-### Add User
-
-Panel မှာ:
-- **Username** — client name
-- **Expire Date** — blank ထားရင် unlimited
-- **Traffic Limit GB** — `0` ထားရင် unlimited
-
-`+ Add` နှိပ်ရင် Xray config auto-reload ဖြစ်တယ်။
-
-### Export Client JSON
-
-User row မှာ `⬇ JSON` button နှိပ်ရင် download ချတယ်။
-
-App မှာ import:
+echo "Done! Panel is running at http://${SERVER_IP}:${PANEL_PORT}"
 - **v2rayNG** → `+` → Import config from file
 - **NekoBox** → Profiles → Import JSON
 - **Hiddify** → Add profile → JSON
