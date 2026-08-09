@@ -1,8 +1,7 @@
-#!/usr/bin/env python3
-import http.server, socketserver, json, uuid, os, subprocess, datetime, time
+#!/usr/init/env python3
+import http.server, socketserver, json, uuid, os, subprocess
 from urllib.parse import parse_qs, urlparse
 
-# Settings
 PORT = 1190
 BASE_DIR = "/opt/vless-panel"
 DB_FILE = os.path.join(BASE_DIR, "data/users.json")
@@ -16,10 +15,15 @@ class VlessHandler(http.server.SimpleHTTPRequestHandler):
 
     def save_db(self, db):
         with open(DB_FILE, 'w') as f: json.dump(db, f, indent=4)
-        self.rebuild_xray()
 
-    def rebuild_xray(self):
-        pass
+    def load_cfg(self):
+        default_cfg = {"server_ip": "127.0.0.1", "vless_port": 80, "ws_path": "/", "host": "d36lt9hzl2ug3d.cloudfront.net"}
+        if not os.path.exists(CFG_FILE): return default_cfg
+        with open(CFG_FILE, 'r') as f: return {**default_cfg, **json.load(f)}
+
+    def save_cfg(self, cfg):
+        os.makedirs(os.path.dirname(CFG_FILE), exist_ok=True)
+        with open(CFG_FILE, 'w') as f: json.dump(cfg, f, indent=4)
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -28,13 +32,79 @@ class VlessHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-type', 'text/html')
             self.end_headers()
             db = self.load_db()
+            config = self.load_cfg()
             
-            html = "<html><body><h1>VLESS Panel</h1>"
-            html += "<form action='/add' method='POST'>Username: <input name='email'> Expiry: <input name='expire' type='date'> <button>Add</button></form>"
-            html += "<table border=1><tr><th>User</th><th>UUID</th><th>Actions</th></tr>"
+            html = f"""<!DOCTYPE html>
+<html>
+<head>
+<title>VLESS Web Panel</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px; }}
+  .container {{ max-width: 1000px; margin: auto; background: #1e293b; padding: 25px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }}
+  h2, h3 {{ color: #38bdf8; border-bottom: 2px solid #334155; padding-bottom: 8px; }}
+  .card {{ background: #0f172a; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #334155; }}
+  input, select {{ background: #1e293b; border: 1px solid #475569; color: #fff; padding: 10px; border-radius: 6px; margin: 5px 0; width: 100%; box-sizing: border-box; }}
+  button {{ background: #0284c7; color: white; border: none; padding: 10px 15px; cursor: pointer; border-radius: 6px; font-weight: bold; width: 100%; }}
+  button:hover {{ background: #0369a1; }}
+  table {{ width: 100%; border-collapse: collapse; margin-top: 15px; }}
+  th, td {{ padding: 12px; border-bottom: 1px solid #334155; text-align: left; font-size: 14px; }}
+  th {{ background: #334155; color: #cbd5e1; }}
+  .btn-sm {{ padding: 6px 10px; font-size: 12px; border-radius: 4px; text-decoration: none; display: inline-block; }}
+  .btn-dl {{ background: #10b981; color: white; }}
+  .btn-del {{ background: #ef4444; color: white; }}
+  .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }}
+</style>
+</head>
+<body>
+<div class="container">
+    <h2>⚡ VLESS Web Panel (Transport & Config Control)</h2>
+    
+    <div class="card">
+        <h3>⚙️ Inbound / Transport Config (Xray Settings)</h3>
+        <form action='/update-config' method='POST'>
+            <div class="grid">
+                <div>
+                    <label>Server Address / Domain:</label>
+                    <input type="text" name="server_ip" value="{config.get('server_ip', '')}">
+                </div>
+                <div>
+                    <label>Port:</label>
+                    <input type="number" name="vless_port" value="{config.get('vless_port', 80)}">
+                </div>
+                <div>
+                    <label>Path:</label>
+                    <input type="text" name="ws_path" value="{config.get('ws_path', '/')}">
+                </div>
+                <div>
+                    <label>Host Header (CloudFront/CDN):</label>
+                    <input type="text" name="host" value="{config.get('host', '')}">
+                </div>
+            </div>
+            <button type="submit" style="margin-top: 10px; background: #0d9488;">Save & Update Config</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h3>➕ Add New User</h3>
+        <form action='/add' method='POST'>
+            <div class="grid">
+                <div><input type="text" name="email" placeholder="Username / Remark" required></div>
+                <div><input type="date" name="expire"></div>
+            </div>
+            <button type="submit" style="margin-top: 10px;">Create User</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h3>👥 User List</h3>
+        <table>
+            <tr><th>Username</th><th>UUID</th><th>Expiry</th><th>Actions</th></tr>"""
+            
             for u in db['users']:
-                html += f"<tr><td>{u['email']}</td><td>{u['uuid']}</td><td><a href='/export?user={u['email']}'>Download JSON</a></td></tr>"
-            html += "</table></body></html>"
+                html += f"<tr><td><b>{u['email']}</b></td><td><code>{u['uuid']}</code></td><td>{u.get('expire', 'Unlimited')}</td><td><a href='/export?user={u['email']}' class='btn-sm btn-dl'>⬇ JSON</a> <a href='/remove?email={u['email']}' class='btn-sm btn-del' onclick='return confirm(\"Delete?\")'>✕ Delete</a></td></tr>"
+            
+            html += """</table></div></div></body></html>"""
             self.wfile.write(html.encode())
 
         elif parsed.path == "/export":
@@ -42,71 +112,79 @@ class VlessHandler(http.server.SimpleHTTPRequestHandler):
             email = query.get('user', [''])[0]
             db = self.load_db()
             user = next((u for u in db['users'] if u['email'] == email), None)
-            config = json.load(open(CFG_FILE))
+            config = self.load_cfg()
             
             if user:
                 payload = {
+                    "log": {"loglevel": "warning"},
                     "outbounds": [{
                         "protocol": "vless",
-                        "settings": {"vnext": [{"address": config['server_ip'], "port": config['vless_port'], "users": [{"id": user['uuid'], "encryption": "none"}]}]},
+                        "settings": {
+                            "vnext": [{
+                                "address": config['server_ip'],
+                                "port": int(config['vless_port']),
+                                "users": [{"id": user['uuid'], "encryption": "none", "flow": "", "level": 8}]
+                            }]
+                        },
                         "streamSettings": {
                             "network": "ws",
                             "security": "none",
-                            "wsSettings": {"path": f"{config['ws_path']}?ed=2048"}
+                            "wsSettings": {
+                                "path": config['ws_path'],
+                                "headers": {"Host": config['host']}
+                            }
                         },
-                        "mux": {"enabled": True, "concurrency": 8}
-                    }]
+                        "mux": {"enabled": False, "concurrency": -1}
+                    }],
+                    "routing": {"domainStrategy": "AsIs", "rules": []}
                 }
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
                 self.send_header('Content-Disposition', f'attachment; filename={email}.json')
                 self.end_headers()
                 self.wfile.write(json.dumps(payload, indent=2).encode())
-        else:
-            self.send_error(404)
-
-    def do_POST(self):
-        if self.path == "/add":
-            length = int(self.headers.get('Content-Length', 0))
-            data = parse_qs(self.rfile.read(length).decode())
+        
+        elif parsed.path == "/remove":
+            query = parse_qs(parsed.query)
+            email = query.get('email', [''])[0]
             db = self.load_db()
-            db['users'].append({
-                "email": data['email'][0],
-                "uuid": str(uuid.uuid4()),
-                "expire": data['expire'][0]
-            })
+            db['users'] = [u for u in db['users'] if u['email'] != email]
             self.save_db(db)
             self.send_response(303)
             self.send_header('Location', '/')
             self.end_headers()
+        else:
+            self.send_error(404)
+
+    def do_POST(self):
+        length = int(self.headers.get('Content-Length', 0))
+        data = parse_qs(self.rfile.read(length).decode())
+        
+        if self.path == "/add":
+            db = self.load_db()
+            db['users'].append({
+                "email": data['email'][0],
+                "uuid": str(uuid.uuid4()),
+                "expire": data['expire'][0] if data.get('expire') and data['expire'][0] else "Unlimited"
+            })
+            self.save_db(db)
+        elif self.path == "/update-config":
+            cfg = self.load_cfg()
+            cfg['server_ip'] = data['server_ip'][0]
+            cfg['vless_port'] = int(data['vless_port'][0])
+            cfg['ws_path'] = data['ws_path'][0]
+            cfg['host'] = data['host'][0]
+            self.save_cfg(cfg)
+
+        self.send_response(303)
+        self.send_header('Location', '/')
+        self.end_headers()
 
 if __name__ == "__main__":
     os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
     with socketserver.TCPServer(("", PORT), VlessHandler) as httpd:
         print(f"Panel running on port {PORT}")
         httpd.serve_forever()
-
-    for cmd in (["systemctl", "reload", "xray"], ["systemctl", "restart", "xray"]):
-        try:
-            subprocess.run(cmd, check=True,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            break
-        except Exception:
-            continue
-
-
-# ── Client JSON export (non-TLS, Mux + Early Data) ─────
-def client_json(email):
-    db = load_db()
-    users = [u for u in db.get("users", []) if u["email"] == email]
-    if not users:
-        return None
-    u = users[0]
-
-    out = {
-        "log": {"loglevel": "warning"},
-        "inbounds": [
-            {"tag": "socks", "port": 10808, "protocol": "socks",
              "settings": {"auth": "noauth", "udp": True}},
             {"tag": "http", "port": 10809, "protocol": "http",
              "settings": {}},
